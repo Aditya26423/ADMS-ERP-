@@ -1,0 +1,1164 @@
+
+Project Structure
+Recommended folder layout inside the Visual Studio solution:
+
+ADMS_ERP/
+├── Controllers/
+│   ├── AccountController.cs      ← Login / Logout
+│   ├── DashboardController.cs    ← Dashboard stats
+│   ├── ItemsController.cs        ← CRUD for Items
+│   ├── ProcessController.cs      ← Process + Tree
+│   └── ProcessedListController.cs
+├── Models/
+│   ├── Item.cs
+│   ├── ItemHierarchy.cs
+│   ├── ProcessingJob.cs
+│   ├── User.cs
+│   └── ViewModels/
+│       └── ViewModels.cs
+├── Repositories/
+│   └── ItemRepository.cs
+├── Data/
+│   └── ApplicationDbContext.cs
+├── Views/
+│   ├── Account/   Login.cshtml
+│   ├── Items/     Index / Create / Edit / Delete / Details .cshtml
+│   ├── Process/   Index.cshtml  Tree.cshtml
+│   ├── ProcessedList/  Index.cshtml
+│   ├── Dashboard/ Index.cshtml
+│   └── Shared/    _Layout.cshtml  _ValidationScripts.cshtml
+├── Scripts/  (jQuery, Bootstrap, custom JS)
+├── Content/  (Bootstrap CSS, custom CSS)
+├── App_Start/ RouteConfig.cs  FilterConfig.cs  BundleConfig.cs
+└── Web.config
+
+3. Database Schema
+3.1 Tables
+Table	Primary Key	Purpose
+Users	UserId	Authentication accounts
+Items	ItemId	Input/output items with weight & status
+ProcessingJobs	JobId	One record per processing action
+ItemHierarchy	HierarchyId	Parent-child links between items
+
+3.2 Relationships
+•	Items 1→many ItemHierarchy (as parent) — one item can produce many children
+•	Items 1→many ItemHierarchy (as child) — a child belongs to exactly one parent
+•	ProcessingJobs 1→many ItemHierarchy — one job groups all children created at once
+•	Users 1→many Items — creator tracking
+
+3.3 Recursive CTE — GetItemTree
+The stored procedure sp_GetItemTree uses a recursive Common Table Expression (CTE) to traverse the parent-child hierarchy to any depth:
+
+WITH ItemTree AS (
+  -- Anchor: root items (no parent)
+  SELECT i.ItemId, i.Name, i.Weight, i.Status,
+         CAST(NULL AS INT) AS ParentItemId, 0 AS Level
+  FROM Items i
+  WHERE NOT EXISTS (SELECT 1 FROM ItemHierarchy WHERE ChildItemId = i.ItemId)
+
+  UNION ALL
+
+  -- Recursive: children of already-found rows
+  SELECT c.ItemId, c.Name, c.Weight, c.Status,
+         h.ParentItemId, t.Level + 1
+  FROM Items c
+  JOIN ItemHierarchy h ON h.ChildItemId = c.ItemId
+  JOIN ItemTree t       ON t.ItemId = h.ParentItemId
+)
+SELECT * FROM ItemTree ORDER BY Level, Name;
+
+4. C# Models
+4.1 Item.cs
+using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace ADMS_ERP.Models
+{
+    public class Item
+    {
+        [Key]
+        public int ItemId { get; set; }
+
+        [Required(ErrorMessage = "Item name is required.")]
+        [StringLength(200, ErrorMessage = "Name cannot exceed 200 characters.")]
+        [Display(Name = "Item Name")]
+        public string Name { get; set; }
+
+        [Required(ErrorMessage = "Weight is required.")]
+        [Range(0.0001, double.MaxValue, ErrorMessage = "Weight must be greater than 0.")]
+        [Display(Name = "Weight (kg)")]
+        public decimal Weight { get; set; }
+
+        [Display(Name = "Status")]
+        public string Status { get; set; } = "Unprocessed";
+
+        [Display(Name = "Created At")]
+        public DateTime CreatedAt { get; set; } = DateTime.Now;
+
+        [Display(Name = "Updated At")]
+        public DateTime UpdatedAt { get; set; } = DateTime.Now;
+
+        public int? CreatedBy { get; set; }
+
+        // Navigation
+        [ForeignKey("CreatedBy")]
+        public virtual User Creator { get; set; }
+
+        public virtual ICollection<ItemHierarchy> ChildHierarchies { get; set; }
+        public virtual ICollection<ItemHierarchy> ParentHierarchies { get; set; }
+        public virtual ICollection<ProcessingJob> ProcessingJobs { get; set; }
+    }
+}
+
+4.2 ItemHierarchy.cs
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace ADMS_ERP.Models
+{
+    public class ItemHierarchy
+    {
+        [Key]
+        public int HierarchyId { get; set; }
+
+        [Required]
+        public int ParentItemId { get; set; }
+
+        [Required]
+        public int ChildItemId { get; set; }
+
+        [Required]
+        public int JobId { get; set; }
+
+        public int SortOrder { get; set; }
+
+        [ForeignKey("ParentItemId")]
+        public virtual Item ParentItem { get; set; }
+
+        [ForeignKey("ChildItemId")]
+        public virtual Item ChildItem { get; set; }
+
+        [ForeignKey("JobId")]
+        public virtual ProcessingJob Job { get; set; }
+    }
+}
+
+4.3 ProcessingJob.cs
+using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace ADMS_ERP.Models
+{
+    public class ProcessingJob
+    {
+        [Key]
+        public int JobId { get; set; }
+
+        [Required]
+        public int ParentItemId { get; set; }
+
+        public DateTime ProcessedAt { get; set; } = DateTime.Now;
+
+        public int? ProcessedBy { get; set; }
+
+        [StringLength(500)]
+        public string Notes { get; set; }
+
+        [ForeignKey("ParentItemId")]
+        public virtual Item ParentItem { get; set; }
+
+        [ForeignKey("ProcessedBy")]
+        public virtual User Processor { get; set; }
+
+        public virtual ICollection<ItemHierarchy> Hierarchies { get; set; }
+    }
+}
+
+4.4 User.cs
+using System;
+using System.ComponentModel.DataAnnotations;
+
+namespace ADMS_ERP.Models
+{
+    public class User
+    {
+        [Key]
+        public int UserId { get; set; }
+
+        [Required, EmailAddress, StringLength(256)]
+        public string Email { get; set; }
+
+        [Required]
+        public string PasswordHash { get; set; }
+
+        [Required, StringLength(100)]
+        public string FullName { get; set; }
+
+        public DateTime CreatedAt { get; set; } = DateTime.Now;
+        public bool IsActive { get; set; } = true;
+    }
+}
+
+4.5 ViewModels.cs
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+
+namespace ADMS_ERP.Models.ViewModels
+{
+    // ---- Login ----
+    public class LoginViewModel
+    {
+        [Required(ErrorMessage = "Email is required.")]
+        [EmailAddress(ErrorMessage = "Enter a valid email address.")]
+        public string Email { get; set; }
+
+        [Required(ErrorMessage = "Password is required.")]
+        [MinLength(6, ErrorMessage = "Password must be at least 6 characters.")]
+        [DataType(DataType.Password)]
+        public string Password { get; set; }
+    }
+
+    // ---- Process Item ----
+    public class ProcessItemViewModel
+    {
+        [Required(ErrorMessage = "Please select a parent item.")]
+        public int ParentItemId { get; set; }
+
+        public string Notes { get; set; }
+
+        [Required]
+        [MinLength(1, ErrorMessage = "Add at least one child item.")]
+        public List<ChildItemInput> Children { get; set; } = new List<ChildItemInput>();
+
+        public List<Item> AvailableItems { get; set; } = new List<Item>();
+    }
+
+    public class ChildItemInput
+    {
+        [Required(ErrorMessage = "Child item name is required.")]
+        [StringLength(200)]
+        public string Name { get; set; }
+
+        [Required]
+        [Range(0.0001, double.MaxValue, ErrorMessage = "Weight must be greater than 0.")]
+        public decimal Weight { get; set; }
+    }
+
+    // ---- Item Tree Node ----
+    public class ItemTreeNode
+    {
+        public int ItemId { get; set; }
+        public string Name { get; set; }
+        public decimal Weight { get; set; }
+        public string Status { get; set; }
+        public int Level { get; set; }
+        public int? ParentItemId { get; set; }
+        public List<ItemTreeNode> Children { get; set; } = new List<ItemTreeNode>();
+    }
+
+    // ---- Dashboard ----
+    public class DashboardViewModel
+    {
+        public int TotalItems { get; set; }
+        public int ProcessedItems { get; set; }
+        public int UnprocessedItems { get; set; }
+        public decimal TotalWeight { get; set; }
+        public List<Item> RecentItems { get; set; }
+        public List<ProcessingJob> RecentJobs { get; set; }
+    }
+}
+
+5. Data Access Layer
+5.1 ApplicationDbContext.cs
+using System.Data.Entity;
+using ADMS_ERP.Models;
+
+namespace ADMS_ERP.Data
+{
+    public class ApplicationDbContext : DbContext
+    {
+        public ApplicationDbContext() : base("name=ADMS_ERP") { }
+
+        public DbSet<Item>           Items           { get; set; }
+        public DbSet<ItemHierarchy>  ItemHierarchies { get; set; }
+        public DbSet<ProcessingJob>  ProcessingJobs  { get; set; }
+        public DbSet<User>           Users           { get; set; }
+
+        protected override void OnModelCreating(DbModelBuilder modelBuilder)
+        {
+            // Item -> ParentHierarchies
+            modelBuilder.Entity<ItemHierarchy>()
+                .HasRequired(h => h.ParentItem)
+                .WithMany(i => i.ChildHierarchies)
+                .HasForeignKey(h => h.ParentItemId)
+                .WillCascadeOnDelete(false);
+
+            // Item -> ChildHierarchies
+            modelBuilder.Entity<ItemHierarchy>()
+                .HasRequired(h => h.ChildItem)
+                .WithMany(i => i.ParentHierarchies)
+                .HasForeignKey(h => h.ChildItemId)
+                .WillCascadeOnDelete(false);
+
+            base.OnModelCreating(modelBuilder);
+        }
+    }
+}
+
+5.2 ItemRepository.cs
+using System;
+using System.Collections.Generic;
+using System.Data.Entity;
+using System.Linq;
+using ADMS_ERP.Data;
+using ADMS_ERP.Models;
+using ADMS_ERP.Models.ViewModels;
+
+namespace ADMS_ERP.Repositories
+{
+    public interface IItemRepository : IDisposable
+    {
+        IEnumerable<Item>   GetAll(string search = null);
+        Item                GetById(int id);
+        void                Add(Item item);
+        void                Update(Item item);
+        void                Delete(int id);
+        void                Save();
+        ProcessResult       ProcessItem(int parentId, int userId, string notes,
+                                        List<ChildItemInput> children);
+        ItemTreeNode        GetItemTree(int? rootId = null);
+        List<ItemTreeNode>  GetAllTrees();
+    }
+
+    public class ItemRepository : IItemRepository
+    {
+        private readonly ApplicationDbContext _db;
+
+        public ItemRepository(ApplicationDbContext db) => _db = db;
+
+        public IEnumerable<Item> GetAll(string search = null)
+        {
+            var q = _db.Items.AsQueryable();
+            if (!string.IsNullOrWhiteSpace(search))
+                q = q.Where(i => i.Name.Contains(search));
+            return q.OrderByDescending(i => i.CreatedAt).ToList();
+        }
+
+        public Item GetById(int id) =>
+            _db.Items.Find(id) ?? throw new KeyNotFoundException($"Item {id} not found.");
+
+        public void Add(Item item)     { _db.Items.Add(item); }
+        public void Update(Item item)  { _db.Entry(item).State = EntityState.Modified; }
+        public void Delete(int id)
+        {
+            var item = GetById(id);
+            _db.Items.Remove(item);
+        }
+        public void Save() => _db.SaveChanges();
+
+        public ProcessResult ProcessItem(
+            int parentId, int userId, string notes, List<ChildItemInput> children)
+        {
+            using var tx = _db.Database.BeginTransaction();
+            try
+            {
+                var parent = GetById(parentId);
+                var totalChildWeight = children.Sum(c => c.Weight);
+
+                if (totalChildWeight > parent.Weight)
+                    return new ProcessResult {
+                        Success = false,
+                        Message = $"Child total ({totalChildWeight:F2} kg) exceeds parent ({parent.Weight:F2} kg)."
+                    };
+
+                // Create processing job
+                var job = new ProcessingJob {
+                    ParentItemId = parentId,
+                    ProcessedBy  = userId,
+                    Notes        = notes
+                };
+                _db.ProcessingJobs.Add(job);
+                _db.SaveChanges();
+
+                // Insert children + hierarchy
+                for (int i = 0; i < children.Count; i++)
+                {
+                    var child = new Item {
+                        Name      = children[i].Name,
+                        Weight    = children[i].Weight,
+                        Status    = "Unprocessed",
+                        CreatedBy = userId
+                    };
+                    _db.Items.Add(child);
+                    _db.SaveChanges();
+
+                    _db.ItemHierarchies.Add(new ItemHierarchy {
+                        ParentItemId = parentId,
+                        ChildItemId  = child.ItemId,
+                        JobId        = job.JobId,
+                        SortOrder    = i
+                    });
+                }
+
+                parent.Status    = "Processed";
+                parent.UpdatedAt = DateTime.Now;
+                _db.Entry(parent).State = EntityState.Modified;
+                _db.SaveChanges();
+                tx.Commit();
+
+                return new ProcessResult { Success = true, JobId = job.JobId,
+                    Message = $"Item processed successfully. {children.Count} output(s) created." };
+            }
+            catch (Exception ex)
+            {
+                tx.Rollback();
+                return new ProcessResult { Success = false, Message = "Processing failed: " + ex.Message };
+            }
+        }
+
+        public List<ItemTreeNode> GetAllTrees()
+        {
+            // Get all root items (no parent)
+            var allItems = _db.Items.ToList();
+            var childIds = _db.ItemHierarchies.Select(h => h.ChildItemId).ToHashSet();
+            var roots = allItems.Where(i => !childIds.Contains(i.ItemId)).ToList();
+            return roots.Select(r => BuildTree(r, allItems,
+                _db.ItemHierarchies.ToList())).ToList();
+        }
+
+        public ItemTreeNode GetItemTree(int? rootId = null)
+        {
+            var allItems = _db.Items.ToList();
+            var allHierarchies = _db.ItemHierarchies.OrderBy(h => h.SortOrder).ToList();
+            if (rootId == null) return null;
+            var root = allItems.FirstOrDefault(i => i.ItemId == rootId);
+            return root == null ? null : BuildTree(root, allItems, allHierarchies);
+        }
+
+        private ItemTreeNode BuildTree(Item item, List<Item> allItems,
+            List<ItemHierarchy> allHierarchies, int level = 0)
+        {
+            var node = new ItemTreeNode {
+                ItemId = item.ItemId, Name = item.Name,
+                Weight = item.Weight, Status = item.Status, Level = level
+            };
+            var childIds = allHierarchies
+                .Where(h => h.ParentItemId == item.ItemId)
+                .OrderBy(h => h.SortOrder)
+                .Select(h => h.ChildItemId).ToList();
+
+            foreach (var cid in childIds)
+            {
+                var child = allItems.FirstOrDefault(i => i.ItemId == cid);
+                if (child != null)
+                    node.Children.Add(BuildTree(child, allItems, allHierarchies, level + 1));
+            }
+            return node;
+        }
+
+        public void Dispose() => _db?.Dispose();
+    }
+
+    public class ProcessResult
+    {
+        public bool   Success { get; set; }
+        public int    JobId   { get; set; }
+        public string Message { get; set; }
+    }
+}
+
+6. Controllers
+6.1 ItemsController.cs
+using System;
+using System.Linq;
+using System.Web.Mvc;
+using ADMS_ERP.Data;
+using ADMS_ERP.Models;
+using ADMS_ERP.Models.ViewModels;
+using ADMS_ERP.Repositories;
+
+namespace ADMS_ERP.Controllers
+{
+    [Authorize]
+    public class ItemsController : Controller
+    {
+        private readonly IItemRepository _repo;
+
+        public ItemsController()
+        {
+            _repo = new ItemRepository(new ApplicationDbContext());
+        }
+
+        // GET: /Items
+        public ActionResult Index(string search = "")
+        {
+            var items = _repo.GetAll(search);
+            ViewBag.Search = search;
+            return View(items);
+        }
+
+        // GET: /Items/Create
+        public ActionResult Create() => View(new Item());
+
+        // POST: /Items/Create
+        [HttpPost, ValidateAntiForgeryToken]
+        public ActionResult Create(Item item)
+        {
+            if (!ModelState.IsValid) return View(item);
+            _repo.Add(item);
+            _repo.Save();
+            TempData["Success"] = "Item created successfully.";
+            return RedirectToAction("Index");
+        }
+
+        // GET: /Items/Edit/5
+        public ActionResult Edit(int id)
+        {
+            try { return View(_repo.GetById(id)); }
+            catch { return HttpNotFound(); }
+        }
+
+        // POST: /Items/Edit/5
+        [HttpPost, ValidateAntiForgeryToken]
+        public ActionResult Edit(Item item)
+        {
+            if (!ModelState.IsValid) return View(item);
+            item.UpdatedAt = DateTime.Now;
+            _repo.Update(item);
+            _repo.Save();
+            TempData["Success"] = "Item updated successfully.";
+            return RedirectToAction("Index");
+        }
+
+        // GET: /Items/Delete/5
+        public ActionResult Delete(int id)
+        {
+            try { return View(_repo.GetById(id)); }
+            catch { return HttpNotFound(); }
+        }
+
+        // POST: /Items/Delete/5
+        [HttpPost, ActionName("Delete"), ValidateAntiForgeryToken]
+        public ActionResult DeleteConfirmed(int id)
+        {
+            _repo.Delete(id);
+            _repo.Save();
+            TempData["Success"] = "Item deleted.";
+            return RedirectToAction("Index");
+        }
+
+        // GET: /Items/Details/5
+        public ActionResult Details(int id)
+        {
+            try { return View(_repo.GetById(id)); }
+            catch { return HttpNotFound(); }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _repo.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+}
+
+6.2 ProcessController.cs
+using System.Collections.Generic;
+using System.Linq;
+using System.Web.Mvc;
+using ADMS_ERP.Data;
+using ADMS_ERP.Models.ViewModels;
+using ADMS_ERP.Repositories;
+using Newtonsoft.Json;
+
+namespace ADMS_ERP.Controllers
+{
+    [Authorize]
+    public class ProcessController : Controller
+    {
+        private readonly IItemRepository _repo;
+
+        public ProcessController()
+        {
+            _repo = new ItemRepository(new ApplicationDbContext());
+        }
+
+        // GET: /Process
+        public ActionResult Index()
+        {
+            var vm = new ProcessItemViewModel {
+                AvailableItems = _repo.GetAll()
+                    .Where(i => i.Status != "Processed")
+                    .ToList()
+            };
+            vm.Children.Add(new ChildItemInput()); // start with one row
+            return View(vm);
+        }
+
+        // POST: /Process
+        [HttpPost, ValidateAntiForgeryToken]
+        public ActionResult Index(ProcessItemViewModel vm, string childrenJson)
+        {
+            // Deserialize children from JSON submitted by JS
+            if (!string.IsNullOrEmpty(childrenJson))
+            {
+                vm.Children = JsonConvert.DeserializeObject<List<ChildItemInput>>(childrenJson)
+                              ?? new List<ChildItemInput>();
+            }
+
+            // Re-populate dropdown
+            vm.AvailableItems = _repo.GetAll()
+                .Where(i => i.Status != "Processed").ToList();
+
+            if (vm.ParentItemId == 0)
+            {
+                ModelState.AddModelError("ParentItemId", "Please select a parent item.");
+                return View(vm);
+            }
+            if (!vm.Children.Any())
+            {
+                ModelState.AddModelError("", "Add at least one child item.");
+                return View(vm);
+            }
+
+            var userId = (int)(Session["UserId"] ?? 1);
+            var result = _repo.ProcessItem(
+                vm.ParentItemId, userId, vm.Notes, vm.Children);
+
+            if (!result.Success)
+            {
+                ModelState.AddModelError("", result.Message);
+                return View(vm);
+            }
+
+            TempData["Success"] = result.Message;
+            return RedirectToAction("Index", "ProcessedList");
+        }
+
+        // GET: /Process/Tree
+        public ActionResult Tree()
+        {
+            var trees = _repo.GetAllTrees();
+            return View(trees);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _repo.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+}
+
+6.3 AccountController.cs
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Web.Mvc;
+using System.Web.Security;
+using ADMS_ERP.Data;
+using ADMS_ERP.Models.ViewModels;
+
+namespace ADMS_ERP.Controllers
+{
+    public class AccountController : Controller
+    {
+        private readonly ApplicationDbContext _db;
+        public AccountController() { _db = new ApplicationDbContext(); }
+
+        // GET: /Account/Login
+        [AllowAnonymous]
+        public ActionResult Login(string returnUrl)
+        {
+            if (User.Identity.IsAuthenticated)
+                return RedirectToAction("Index", "Dashboard");
+            ViewBag.ReturnUrl = returnUrl;
+            return View();
+        }
+
+        // POST: /Account/Login
+        [HttpPost, AllowAnonymous, ValidateAntiForgeryToken]
+        public ActionResult Login(LoginViewModel model, string returnUrl)
+        {
+            if (!ModelState.IsValid) return View(model);
+
+            var hash = HashPassword(model.Password);
+            var user = _db.Users.FirstOrDefault(u =>
+                u.Email == model.Email && u.PasswordHash == hash && u.IsActive);
+
+            if (user == null)
+            {
+                ModelState.AddModelError("", "Invalid email or password.");
+                return View(model);
+            }
+
+            Session["UserId"]   = user.UserId;
+            Session["UserName"] = user.FullName;
+            FormsAuthentication.SetAuthCookie(user.Email, false);
+
+            if (!string.IsNullOrEmpty(returnUrl) && Url.IsLocalUrl(returnUrl))
+                return Redirect(returnUrl);
+            return RedirectToAction("Index", "Dashboard");
+        }
+
+        // POST: /Account/Logout
+        [HttpPost, ValidateAntiForgeryToken]
+        public ActionResult Logout()
+        {
+            FormsAuthentication.SignOut();
+            Session.Clear();
+            return RedirectToAction("Login");
+        }
+
+        private static string HashPassword(string password)
+        {
+            using var sha = SHA256.Create();
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(password));
+            return string.Concat(bytes.Select(b => b.ToString("x2")));
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _db?.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+}
+
+7. Razor Views (Key Examples)
+7.1 Views/Shared/_Layout.cshtml
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>@ViewBag.Title - ADMS ERP</title>
+  @Styles.Render("~/Content/css")
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <a class="navbar-brand" href="/">ADMS ERP</a>
+    @if (Request.IsAuthenticated) {
+    <div class="navbar-nav">
+      @Html.ActionLink("Dashboard","Index","Dashboard",null,new{@class="nav-link"})
+      @Html.ActionLink("Items","Index","Items",null,new{@class="nav-link"})
+      @Html.ActionLink("Process","Index","Process",null,new{@class="nav-link"})
+      @Html.ActionLink("Processed List","Index","ProcessedList",null,new{@class="nav-link"})
+      @Html.ActionLink("Tree View","Tree","Process",null,new{@class="nav-link"})
+    </div>
+    @using (Html.BeginForm("Logout","Account",FormMethod.Post)) {
+      @Html.AntiForgeryToken()
+      <button class="btn btn-sm btn-outline-light">Logout</button>
+    }}
+  </nav>
+  <div class="container mt-4">
+    @if (TempData["Success"] != null) {
+      <div class="alert alert-success">@TempData["Success"]</div>
+    }
+    @RenderBody()
+  </div>
+  @Scripts.Render("~/bundles/jquery")
+  @Scripts.Render("~/bundles/bootstrap")
+  @RenderSection("Scripts", required: false)
+</body>
+</html>
+
+7.2 Views/Items/Index.cshtml
+@model IEnumerable<ADMS_ERP.Models.Item>
+@{ ViewBag.Title = "Items"; }
+<h2>Items</h2>
+@using (Html.BeginForm("Index","Items",FormMethod.Get,new{@class="d-flex gap-2 mb-3"})){
+  <input name="search" value="@ViewBag.Search" class="form-control" placeholder="Search..."/>
+  <button class="btn btn-outline-primary">Search</button>
+  @Html.ActionLink("+ Add Item","Create",null,new{@class="btn btn-primary"})
+}
+<table class="table table-hover">
+  <thead class="table-dark">
+    <tr><th>#</th><th>Name</th><th>Weight (kg)</th><th>Status</th><th>Created</th><th>Actions</th></tr>
+  </thead>
+  <tbody>
+  @foreach (var item in Model) {
+    <tr>
+      <td>@item.ItemId</td>
+      <td>@item.Name</td>
+      <td>@item.Weight.ToString("F2")</td>
+      <td><span class="badge @(item.Status=="Processed"?"bg-success":"bg-info")">
+            @item.Status</span></td>
+      <td>@item.CreatedAt.ToString("yyyy-MM-dd")</td>
+      <td>
+        @Html.ActionLink("Edit","Edit",new{id=item.ItemId},new{@class="btn btn-sm btn-outline-secondary"})
+        @Html.ActionLink("Details","Details",new{id=item.ItemId},new{@class="btn btn-sm btn-outline-info"})
+        @Html.ActionLink("Delete","Delete",new{id=item.ItemId},new{@class="btn btn-sm btn-outline-danger"})
+      </td>
+    </tr>
+  }
+  </tbody>
+</table>
+
+7.3 Views/Process/Index.cshtml — Dynamic Child Rows
+@model ADMS_ERP.Models.ViewModels.ProcessItemViewModel
+@{ ViewBag.Title = "Process Item"; }
+<h2>Process Item</h2>
+@using (Html.BeginForm()) {
+  @Html.AntiForgeryToken()
+  <div class="mb-3">
+    <label>Parent Item</label>
+    @Html.DropDownListFor(m=>m.ParentItemId,
+      new SelectList(Model.AvailableItems,"ItemId","Name"),
+      "-- Select Parent --", new{@class="form-select",id="parentSelect"})
+    @Html.ValidationMessageFor(m=>m.ParentItemId)
+  </div>
+  <div id="weightBar" class="mb-3" style="display:none">
+    <small>Remaining: <span id="remaining">0</span> kg</small>
+    <div class="progress"><div id="wFill" class="progress-bar"></div></div>
+  </div>
+  <div id="childContainer"></div>
+  <button type="button" class="btn btn-secondary" onclick="addChild()">+ Add Child</button>
+  <input type="hidden" id="childrenJson" name="childrenJson" />
+  <button type="submit" class="btn btn-primary" onclick="collectChildren()">Process</button>
+}
+@section Scripts {
+<script>
+var parentData = @Html.Raw(Json.Encode(Model.AvailableItems));
+var childIdx = 0;
+function addChild() {
+  var row = '<div class="d-flex gap-2 mb-2" id="child'+childIdx+'">'
+    + '<input class="form-control cname" placeholder="Child name"/>'
+    + '<input class="form-control cweight" type="number" step="0.01" placeholder="Weight"/>'
+    + '<button type="button" class="btn btn-danger" onclick="rmChild('+childIdx+')">x</button></div>';
+  document.getElementById('childContainer').insertAdjacentHTML('beforeend',row);
+  childIdx++;
+}
+function rmChild(i) { document.getElementById('child'+i).remove(); updateBar(); }
+function updateBar() {
+  var pid = document.getElementById('parentSelect').value;
+  var parent = parentData.find(p=>p.ItemId==pid);
+  if (!parent) { document.getElementById('weightBar').style.display='none'; return; }
+  var used = Array.from(document.querySelectorAll('.cweight'))
+              .reduce((s,e)=>s+parseFloat(e.value||0),0);
+  var rem = Math.max(0, parent.Weight - used);
+  document.getElementById('remaining').textContent = rem.toFixed(2);
+  var pct = Math.min(100, Math.round(used/parent.Weight*100));
+  document.getElementById('wFill').style.width = pct+'%';
+  document.getElementById('weightBar').style.display='block';
+}
+document.getElementById('parentSelect').addEventListener('change', updateBar);
+document.addEventListener('input', function(e){ if(e.target.classList.contains('cweight')) updateBar(); });
+function collectChildren() {
+  var rows = document.querySelectorAll('#childContainer > div');
+  var arr = [];
+  rows.forEach(r=>{ var n=r.querySelector('.cname').value;
+    var w=parseFloat(r.querySelector('.cweight').value);
+    if(n&&w>0) arr.push({Name:n,Weight:w}); });
+  document.getElementById('childrenJson').value = JSON.stringify(arr);
+}
+addChild();
+</script>
+}
+
+7.4 Views/Process/Tree.cshtml — Recursive Tree
+@model List<ADMS_ERP.Models.ViewModels.ItemTreeNode>
+@{ ViewBag.Title = "Item Tree"; }
+<h2>Item Tree View</h2>
+@helper RenderNode(ADMS_ERP.Models.ViewModels.ItemTreeNode node) {
+  <li class="list-group-item">
+    <div class="d-flex align-items-center gap-2">
+      <strong>@node.Name</strong>
+      <span class="badge bg-secondary">@node.Weight.ToString("F2") kg</span>
+      <span class="badge @(node.Status=="Processed"?"bg-success":"bg-info")">@node.Status</span>
+    </div>
+    @if (node.Children.Any()) {
+      <ul class="list-group list-group-flush ms-4 mt-2">
+        @foreach (var child in node.Children) {
+          @RenderNode(child)
+        }
+      </ul>
+    }
+  </li>
+}
+<ul class="list-group">
+@foreach (var root in Model) {
+  @RenderNode(root)
+}
+</ul>
+
+8. SQL Server Database Script
+Save this script as ADMS_ERP_Database.sql and execute it in SQL Server Management Studio (SSMS) or Azure Data Studio. The script creates the database from scratch, including all tables, indexes, views, stored procedures, and seed data.
+
+-- ============================================================
+-- ADMS ERP System - SQL Server Database Script
+-- ============================================================
+
+USE master;
+GO
+
+IF EXISTS (SELECT name FROM sys.databases WHERE name = 'ADMS_ERP')
+    DROP DATABASE ADMS_ERP;
+GO
+
+CREATE DATABASE ADMS_ERP;
+GO
+
+USE ADMS_ERP;
+GO
+
+-- ============================================================
+-- TABLE: Users
+-- ============================================================
+CREATE TABLE Users (
+    UserId      INT IDENTITY(1,1) PRIMARY KEY,
+    Email       NVARCHAR(256) NOT NULL UNIQUE,
+    PasswordHash NVARCHAR(512) NOT NULL,
+    FullName    NVARCHAR(100) NOT NULL,
+    CreatedAt   DATETIME2 DEFAULT GETDATE(),
+    IsActive    BIT DEFAULT 1
+);
+GO
+
+-- ============================================================
+-- TABLE: Items
+-- ============================================================
+CREATE TABLE Items (
+    ItemId      INT IDENTITY(1,1) PRIMARY KEY,
+    Name        NVARCHAR(200) NOT NULL,
+    Weight      DECIMAL(18,4) NOT NULL CHECK (Weight > 0),
+    Status      NVARCHAR(50)  NOT NULL DEFAULT 'Unprocessed'
+                CHECK (Status IN ('Unprocessed','Processed','PartiallyProcessed')),
+    CreatedAt   DATETIME2     DEFAULT GETDATE(),
+    UpdatedAt   DATETIME2     DEFAULT GETDATE(),
+    CreatedBy   INT           REFERENCES Users(UserId)
+);
+GO
+
+-- ============================================================
+-- TABLE: ProcessingJobs
+-- ============================================================
+CREATE TABLE ProcessingJobs (
+    JobId       INT IDENTITY(1,1) PRIMARY KEY,
+    ParentItemId INT NOT NULL REFERENCES Items(ItemId),
+    ProcessedAt DATETIME2 DEFAULT GETDATE(),
+    ProcessedBy INT REFERENCES Users(UserId),
+    Notes       NVARCHAR(500)
+);
+GO
+
+-- ============================================================
+-- TABLE: ItemHierarchy (parent-child relationship)
+-- ============================================================
+CREATE TABLE ItemHierarchy (
+    HierarchyId INT IDENTITY(1,1) PRIMARY KEY,
+    ParentItemId INT NOT NULL REFERENCES Items(ItemId),
+    ChildItemId  INT NOT NULL REFERENCES Items(ItemId),
+    JobId        INT NOT NULL REFERENCES ProcessingJobs(JobId),
+    SortOrder    INT DEFAULT 0,
+    CONSTRAINT UQ_ChildItem UNIQUE (ChildItemId)
+);
+GO
+
+-- ============================================================
+-- INDEXES
+-- ============================================================
+CREATE INDEX IX_Items_Status       ON Items(Status);
+CREATE INDEX IX_Items_CreatedAt    ON Items(CreatedAt DESC);
+CREATE INDEX IX_Hierarchy_Parent   ON ItemHierarchy(ParentItemId);
+CREATE INDEX IX_Hierarchy_Child    ON ItemHierarchy(ChildItemId);
+CREATE INDEX IX_Jobs_ParentItem    ON ProcessingJobs(ParentItemId);
+GO
+
+-- ============================================================
+-- VIEW: ItemTreeView
+-- ============================================================
+CREATE VIEW ItemTreeView AS
+SELECT
+    p.ItemId        AS ParentItemId,
+    p.Name          AS ParentName,
+    p.Weight        AS ParentWeight,
+    p.Status        AS ParentStatus,
+    c.ItemId        AS ChildItemId,
+    c.Name          AS ChildName,
+    c.Weight        AS ChildWeight,
+    c.Status        AS ChildStatus,
+    h.SortOrder,
+    j.ProcessedAt,
+    j.JobId
+FROM Items p
+JOIN ItemHierarchy h ON h.ParentItemId = p.ItemId
+JOIN Items c         ON c.ItemId = h.ChildItemId
+JOIN ProcessingJobs j ON j.JobId = h.JobId;
+GO
+
+-- ============================================================
+-- STORED PROCEDURE: ProcessItem
+-- ============================================================
+CREATE PROCEDURE sp_ProcessItem
+    @ParentItemId  INT,
+    @ProcessedBy   INT,
+    @Notes         NVARCHAR(500),
+    @ChildrenXml   XML   -- <Children><Child Name="X" Weight="10.5"/></Children>
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRANSACTION;
+    BEGIN TRY
+        -- Validate parent exists
+        IF NOT EXISTS (SELECT 1 FROM Items WHERE ItemId = @ParentItemId)
+            THROW 50001, 'Parent item not found.', 1;
+
+        -- Get parent weight
+        DECLARE @ParentWeight DECIMAL(18,4);
+        SELECT @ParentWeight = Weight FROM Items WHERE ItemId = @ParentItemId;
+
+        -- Parse children from XML
+        DECLARE @Children TABLE (Name NVARCHAR(200), Weight DECIMAL(18,4));
+        INSERT INTO @Children
+        SELECT
+            c.value('@Name','NVARCHAR(200)'),
+            c.value('@Weight','DECIMAL(18,4)')
+        FROM @ChildrenXml.nodes('/Children/Child') AS T(c);
+
+        -- Validate total child weight <= parent weight
+        DECLARE @TotalChildWeight DECIMAL(18,4);
+        SELECT @TotalChildWeight = SUM(Weight) FROM @Children;
+        IF @TotalChildWeight > @ParentWeight
+            THROW 50002, 'Total child weight exceeds parent weight.', 1;
+
+        -- Create processing job
+        DECLARE @JobId INT;
+        INSERT INTO ProcessingJobs (ParentItemId, ProcessedBy, Notes)
+        VALUES (@ParentItemId, @ProcessedBy, @Notes);
+        SET @JobId = SCOPE_IDENTITY();
+
+        -- Insert child items and hierarchy
+        DECLARE @ChildItemId INT, @SortOrder INT = 0;
+        DECLARE @ChildName NVARCHAR(200), @ChildWeight DECIMAL(18,4);
+
+        DECLARE cur CURSOR FOR SELECT Name, Weight FROM @Children;
+        OPEN cur;
+        FETCH NEXT FROM cur INTO @ChildName, @ChildWeight;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            INSERT INTO Items (Name, Weight, Status, CreatedBy)
+            VALUES (@ChildName, @ChildWeight, 'Unprocessed', @ProcessedBy);
+            SET @ChildItemId = SCOPE_IDENTITY();
+
+            INSERT INTO ItemHierarchy (ParentItemId, ChildItemId, JobId, SortOrder)
+            VALUES (@ParentItemId, @ChildItemId, @JobId, @SortOrder);
+
+            SET @SortOrder += 1;
+            FETCH NEXT FROM cur INTO @ChildName, @ChildWeight;
+        END
+        CLOSE cur; DEALLOCATE cur;
+
+        -- Mark parent as Processed
+        UPDATE Items SET Status = 'Processed', UpdatedAt = GETDATE()
+        WHERE ItemId = @ParentItemId;
+
+        COMMIT TRANSACTION;
+        SELECT @JobId AS JobId, 'Success' AS Result;
+    END TRY
+    BEGIN CATCH
+        ROLLBACK TRANSACTION;
+        THROW;
+    END CATCH
+END;
+GO
+
+-- ============================================================
+-- STORED PROCEDURE: GetItemTree (recursive CTE)
+-- ============================================================
+CREATE PROCEDURE sp_GetItemTree
+    @RootItemId INT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    WITH ItemTree AS (
+        -- Anchor: root items (no parent or specific root)
+        SELECT
+            i.ItemId, i.Name, i.Weight, i.Status,
+            CAST(NULL AS INT) AS ParentItemId,
+            0 AS Level,
+            CAST(i.Name AS NVARCHAR(MAX)) AS Path
+        FROM Items i
+        WHERE (@RootItemId IS NULL AND NOT EXISTS (
+                SELECT 1 FROM ItemHierarchy WHERE ChildItemId = i.ItemId))
+           OR (i.ItemId = @RootItemId)
+
+        UNION ALL
+
+        -- Recursive: children
+        SELECT
+            c.ItemId, c.Name, c.Weight, c.Status,
+            h.ParentItemId,
+            t.Level + 1,
+            t.Path + ' > ' + c.Name
+        FROM Items c
+        JOIN ItemHierarchy h ON h.ChildItemId = c.ItemId
+        JOIN ItemTree t       ON t.ItemId = h.ParentItemId
+    )
+    SELECT * FROM ItemTree ORDER BY Path;
+END;
+GO
+
+-- ============================================================
+-- SEED DATA
+-- ============================================================
+INSERT INTO Users (Email, PasswordHash, FullName)
+VALUES ('admin@adms.com',
+        '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9',
+        'System Admin');
+GO
+
+INSERT INTO Items (Name, Weight, Status, CreatedBy) VALUES
+    ('Steel Rod A',       100.0000, 'Unprocessed',       1),
+    ('Copper Sheet B',     60.0000, 'Processed',          1),
+    ('Aluminum Block C',   80.0000, 'Unprocessed',        1),
+    ('Iron Pipe D',        45.0000, 'Processed',          1),
+    ('Brass Fitting E',    20.0000, 'Unprocessed',        1);
+GO
+
+INSERT INTO ProcessingJobs (ParentItemId, ProcessedBy, Notes) VALUES (2, 1, 'Initial split');
+INSERT INTO Items (Name, Weight, Status, CreatedBy) VALUES
+    ('Copper Strip 1', 25.0, 'Unprocessed', 1),
+    ('Copper Strip 2', 20.0, 'Unprocessed', 1),
+    ('Copper Scrap',   15.0, 'Unprocessed', 1);
+INSERT INTO ItemHierarchy (ParentItemId, ChildItemId, JobId, SortOrder) VALUES
+    (2, 6, 1, 0), (2, 7, 1, 1), (2, 8, 1, 2);
+
+INSERT INTO ProcessingJobs (ParentItemId, ProcessedBy, Notes) VALUES (4, 1, 'Pipe cut');
+INSERT INTO Items (Name, Weight, Status, CreatedBy) VALUES
+    ('Short Pipe',   30.0, 'Unprocessed', 1),
+    ('Iron Offcut',  15.0, 'Unprocessed', 1);
+INSERT INTO ItemHierarchy (ParentItemId, ChildItemId, JobId, SortOrder) VALUES
+    (4, 9, 2, 0), (4, 10, 2, 1);
+GO
+
+9. Web.config
+Update the connection string to match your SQL Server instance name:
+
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <connectionStrings>
+    <add name="ADMS_ERP"
+         connectionString="Data Source=.;Initial Catalog=ADMS_ERP;Integrated Security=True;MultipleActiveResultSets=True"
+         providerName="System.Data.SqlClient" />
+  </connectionStrings>
+  <appSettings>
+    <add key="webpages:Version" value="3.0.0.0" />
+    <add key="webpages:Enabled" value="false" />
+    <add key="ClientValidationEnabled" value="true" />
+    <add key="UnobtrusiveJavaScriptEnabled" value="true" />
+  </appSettings>
+  <system.web>
+    <compilation debug="true" targetFramework="4.8" />
+    <httpRuntime targetFramework="4.8" />
+    <authentication mode="Forms">
+      <forms loginUrl="~/Account/Login" timeout="60" />
+    </authentication>
+    <authorization>
+      <deny users="?" />
+    </authorization>
+  </system.web>
+</configuration>
