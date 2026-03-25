@@ -1,0 +1,17 @@
+Server-side (DataAnnotations)
+•	[Required] — name, weight, parent selection
+•	[Range(0.0001, double.MaxValue)] — weight > 0
+•	[StringLength(200)] — name length cap
+•	[EmailAddress] — login email format
+•	[MinLength(6)] — password minimum
+
+11.2 Business Rule Validation (Repository)
+•	Total child weight must not exceed parent weight
+•	Parent item must exist before processing
+•	At least one valid child item required
+•	Transaction rollback on any failure — data integrity guaranteed
+
+11.3 Client-side (jQuery Unobtrusive Validation)
+•	Enabled via ClientValidationEnabled and UnobtrusiveJavaScriptEnabled in Web.config
+•	Live weight bar shows remaining capacity before form submission
+•	JSON child data collected client-side and passed as hidden field
