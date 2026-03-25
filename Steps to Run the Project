@@ -1,0 +1,24 @@
+Prerequisites
+•	Visual Studio 2019 or 2022 (with ASP.NET workload)
+•	SQL Server 2017+ or SQL Server Express
+•	SQL Server Management Studio (SSMS) or Azure Data Studio
+•	.NET Framework 4.8 Developer Pack
+
+Step-by-Step Setup
+1.	Clone the repository:  git clone https://github.com/your-org/ADMS_ERP.git
+2.	Open ADMS_ERP.sln in Visual Studio
+3.	Restore NuGet packages: right-click Solution > Restore NuGet Packages
+4.	Run the SQL script: open ADMS_ERP_Database.sql in SSMS and execute (F5)
+5.	Update Web.config connection string — change Data Source=. to your SQL Server name if needed
+6.	Build the solution: Ctrl+Shift+B
+7.	Press F5 to run. Browser opens at https://localhost:PORT/Account/Login
+8.	Login with:  Email: admin@adms.com  |  Password: admin123
+
+NuGet Packages Required
+Package	Version	Purpose
+EntityFramework	6.4.4	ORM — database access
+Microsoft.AspNet.Mvc	5.3.0	MVC framework
+Microsoft.AspNet.Identity.Core	2.2.3	Identity infrastructure
+Bootstrap	5.3.0	CSS framework (via Libman or CDN)
+Newtonsoft.Json	13.0.3	JSON serialization for child items
+
